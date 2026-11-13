@@ -16,6 +16,7 @@ export class SimulationManager {
     this.mouse = new THREE.Vector2();
 
     this.waves = [];
+    this.scheduledImpacts = []; // 프리셋에서 일정 시간 뒤에 발생시킬 충격 목록
     this.elapsed = 0; // 시뮬레이션 경과 시간(초)
 
     // 💡 주/야간 모드 파라미터
@@ -23,23 +24,23 @@ export class SimulationManager {
     this.legalThreshold = 39.0; // 주간: 39dB, 야간: 34dB (아랫집 등 수신 세대 기준)
 
     this.sampleTimer = 0;
+    this.windowSeconds = 20; // 시연 반응성을 위해 20초 슬라이딩 윈도우 적용
 
-    // 💡 발생 지점의 충격 소음 크기
+    // 💡 단발 충격은 기준 이하로 유지되고, 연속/반복 소음만 기준을 넘도록 세기 보정
     //    아랫집에는 바닥 투과 손실 + 벽을 타고 내려가는 거리 감쇠만큼 줄어서 전달되므로 높게 설정
-    //    (윗집 바닥 중앙을 10초 정도 누르면 아랫집 1분 Leq가 주간 기준 39dB를 넘음)
-    this.baseL0 = 43.0;
-    this.waveSpeed = 8.0; // 파동이 구조물을 따라 퍼지는 속도 (벽·천장을 타고 가야 하므로 이전보다 빠르게)
-    this.waveLifetime = 3.0; // 파동이 사라지기 시작하는 시간(초)
+    this.baseL0 = 42.0; // 1회 클릭 기본 세기
+    this.waveSpeed = 16.0; // 파동이 구조물(바닥·벽·천장)을 따라 퍼지는 속도
+    this.waveLifetime = 1.4; // 파동이 사라지기 시작하는 시간(초)
 
     // 💡 세대 간 투과 손실 (dB)
     this.slabTL = 6.0; // 위층 → 아래층 (바닥 슬래브를 통한 충격음, 벽을 타고 내려가며 거리 감쇠가 추가로 생김)
     this.upwardTL = 25.0; // 아래층 → 위층 (충격음은 위로 잘 안 올라감)
-    this.sideTL = 20.0; // 옆 세대 (세대 간 벽)
+    this.sideTL = 14.0; // 옆 세대 (세대 간 벽)
 
     // 💡 소음을 낸 세대의 색은 "아랫집에 전달되는 수준"으로 표시
-    //    (발생 세기 그대로 칠하면 짧은 클릭에도 바로 빨간색이 되므로 15dB 낮춰서 표시 → 짧은 클릭은 초록색)
+    //    (발생 세기 그대로 칠하면 짧은 클릭에도 바로 빨간색이 되므로 낮춰서 표시 → 짧은 클릭은 초록색)
     //    색에만 적용되며, Leq 측정값에는 영향 없음
-    this.sourceColorOffset = 15.0;
+    this.sourceColorOffset = 14.0;
 
     // 💡 길게 누르기 파라미터
     this.isPressing = false; // 현재 마우스를 누르고 있는지
@@ -49,13 +50,13 @@ export class SimulationManager {
     this.emitTimer = 0; // 마지막 파동 생성 후 흐른 시간(초)
     this.emitInterval = 0.1; // 누르는 동안 파동 생성 간격(초) - 짧을수록 색 경계가 매끄러움
     this.pulseOffset = 7.0; // 파동을 촘촘히 만드는 만큼 1개당 세기를 낮춤 (0.5초 간격 대비 5배 → 10·log10(5) ≈ 7dB)
-    this.growthRate = 2.0; // 누르고 있는 1초당 증가하는 dB
+    this.growthRate = 2.5; // 누르고 있는 1초당 증가하는 dB
     this.maxL0 = 60.0; // 파동 1개의 최대 dB
-    this.fadeTime = 1.5; // 끝까지 퍼진 파동이 서서히 사라지는 시간(초)
-    this.edgeWidth = 2.0; // 퍼져 나가는 원의 테두리를 부드럽게 하는 폭 (색 표시용)
+    this.fadeTime = 0.8; // waveLifetime이 지난 파동이 서서히 사라지는 시간(초)
+    this.edgeWidth = 2.5; // 퍼져 나가는 원의 테두리를 부드럽게 하는 폭 (색 표시용)
 
     // 💡 색상 깜빡임 방지: 각 정점의 색은 dB를 부드럽게 따라감
-    this.colorSmoothing = 4.0; // 클수록 빠르게 반응, 작을수록 부드러움
+    this.colorSmoothing = 5.0; // 클수록 빠르게 반응, 작을수록 부드러움
 
     this.initUnits();
     this.initInteraction();
@@ -65,7 +66,7 @@ export class SimulationManager {
   // 세대별 측정 버퍼와 정점 캐시 준비
   initUnits() {
     for (const unit of this.units) {
-      unit.sampleBuffer = []; // 1초마다 측정한 최대 dB (최근 60개)
+      unit.sampleBuffer = []; // 1초마다 측정한 최대 dB (최근 windowSeconds개)
       unit.currentPeak = 0; // 이번 프레임의 최대 dB
       unit.lastSourceAt = -Infinity; // 마지막으로 소음을 발생시킨 시각
       unit.idle = true; // 색이 모두 기본색으로 돌아왔는지
@@ -152,6 +153,97 @@ export class SimulationManager {
     this.updateDecibelUI();
   }
 
+  // 💡 소음 프리셋: 201호 바닥 중앙에서 미리 정해 둔 충격을 발생시킴 (index.html 버튼에서 호출)
+  triggerPreset(type) {
+    const targetUnit =
+      this.units.find((u) => u.name === '201호') || this.units[0];
+    const centerPoint = targetUnit.floor.position.clone();
+
+    if (type === 'walk') {
+      // 가벼운 발걸음 2보: 약한 파동만 퍼지고 기준 이하 유지
+      this.addImpact(centerPoint, targetUnit, 42.0);
+      this.scheduledImpacts.push({
+        delay: 0.6,
+        point: new THREE.Vector3(
+          centerPoint.x + 1.2,
+          centerPoint.y,
+          centerPoint.z + 0.8,
+        ),
+        unit: targetUnit,
+        decibel: 42.0,
+      });
+    } else if (type === 'run') {
+      // 아이 뛰기: 연속 발구름 14회 -> 지속 소음으로 기준 초과
+      for (let i = 0; i < 14; i++) {
+        const offsetX = (i % 2 === 0 ? -1 : 1) * 0.8;
+        const offsetZ = (i - 6.5) * 0.4;
+        const pt = new THREE.Vector3(
+          centerPoint.x + offsetX,
+          centerPoint.y,
+          centerPoint.z + offsetZ,
+        );
+        if (i === 0) {
+          this.addImpact(pt, targetUnit, 56.0);
+        } else {
+          this.scheduledImpacts.push({
+            delay: i * 0.25,
+            point: pt,
+            unit: targetUnit,
+            decibel: 56.0,
+          });
+        }
+      }
+    } else if (type === 'hammer') {
+      // 💡 망치질 1회 단발 타격: 순간적으로 강한 파동이 퍼지지만 1번만 치면 기준 이하 유지!
+      // (버튼을 3~4번 연속 클릭하면 에너지가 누적되어 기준 초과로 전환됨)
+      this.addImpact(centerPoint, targetUnit, 56.0);
+    }
+  }
+
+  // 💡 측정 초기화: 파동·예약된 충격·측정값을 모두 지우고 색과 바닥 변위를 기본 상태로 되돌림
+  reset() {
+    this.waves = [];
+    this.scheduledImpacts = [];
+    this.isPressing = false;
+    this.pressPoint = null;
+    this.pressUnit = null;
+    this.sampleTimer = 0;
+    if (this.controls) this.controls.enabled = true;
+
+    const baseColor = this.decibelToColor(0);
+
+    for (const unit of this.units) {
+      unit.sampleBuffer = [];
+      unit.currentPeak = 0;
+      unit.lastSourceAt = -Infinity;
+      unit.idle = true;
+
+      for (const surface of unit.surfaces) {
+        surface.smoothed.fill(0);
+        surface.idle = true;
+
+        const posAttr = surface.geometry.attributes.position;
+        const colorAttr = surface.geometry.attributes.color;
+        const count = posAttr.count;
+
+        for (let i = 0; i < count; i++) {
+          if (!surface.isWall) {
+            posAttr.setZ(i, 0);
+          }
+          colorAttr.setXYZ(i, baseColor.r, baseColor.g, baseColor.b);
+        }
+
+        colorAttr.needsUpdate = true;
+        if (!surface.isWall) {
+          posAttr.needsUpdate = true;
+          surface.geometry.computeVertexNormals();
+        }
+      }
+    }
+
+    this.updateDecibelUI();
+  }
+
   // 화면 좌표 → 클릭한 세대 바닥 위의 3D 좌표 ({ point, unit } 또는 null)
   pickFloor(event) {
     this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -220,7 +312,7 @@ export class SimulationManager {
       y: unit.floorY, // 충격이 일어난 바닥 높이
       unit, // 소음이 발생한 세대
       radius: 0.1, // 파동 앞부분까지의 경로 거리 (구조물 표면을 따라 잰 거리)
-      maxRadius: 40.0, // 아래·위층 바닥까지 닿을 수 있도록 충분히 크게
+      maxRadius: 45.0, // 아래·위층 바닥까지 닿을 수 있도록 충분히 크게
       time: 0,
       initialDecibel: decibel,
       fade: 1.0, // 1 → 0 으로 서서히 사라짐
@@ -231,7 +323,17 @@ export class SimulationManager {
   update(delta) {
     this.elapsed += delta;
 
-    // 0. 누르고 있는 동안: 누른 시간에 비례해 더 큰 파동을 주기적으로 생성
+    // 0-1. 프리셋에서 예약해 둔 충격을 시간에 맞춰 발생
+    for (let i = this.scheduledImpacts.length - 1; i >= 0; i--) {
+      const item = this.scheduledImpacts[i];
+      item.delay -= delta;
+      if (item.delay <= 0) {
+        this.addImpact(item.point, item.unit, item.decibel);
+        this.scheduledImpacts.splice(i, 1);
+      }
+    }
+
+    // 0-2. 누르고 있는 동안: 누른 시간에 비례해 더 큰 파동을 주기적으로 생성
     if (this.isPressing && this.pressPoint) {
       this.holdTime += delta;
       this.emitTimer += delta;
@@ -251,8 +353,8 @@ export class SimulationManager {
       w.radius = Math.min(w.radius + this.waveSpeed * delta, w.maxRadius);
       w.time += delta;
 
-      // 💡 감쇠 속도를 천천히 설정 (초당 1.5dB 감소)
-      w.initialDecibel -= delta * 1.5;
+      // 💡 시간에 따른 감쇠 (초당 3dB 감소)
+      w.initialDecibel -= delta * 3.0;
 
       // 💡 waveLifetime이 지난 파동은 fadeTime 동안 서서히 사라짐
       //    (한 번에 삭제하면 색 영역이 갑자기 줄었다 늘었다 함)
@@ -274,14 +376,14 @@ export class SimulationManager {
       this.updateUnit(unit);
     }
 
-    // 3. 1초 간격으로 세대별 측정값 수집
+    // 3. 1초 간격으로 세대별 측정값 수집 (최근 windowSeconds초만 유지)
     this.sampleTimer += delta;
     if (this.sampleTimer >= 1.0) {
       this.sampleTimer = 0;
 
       for (const unit of this.units) {
         unit.sampleBuffer.push(unit.currentPeak);
-        if (unit.sampleBuffer.length > 60) {
+        if (unit.sampleBuffer.length > this.windowSeconds) {
           unit.sampleBuffer.shift();
         }
       }
@@ -588,13 +690,15 @@ export class SimulationManager {
 
     if (sumEnergy === 0) return 0;
 
-    const meanEnergy = sumEnergy / buffer.length;
+    // 20초 기준 분모 적용 (단발 충격 1회는 기준 이하 유지, 반복/연속 소음만 기준 초과)
+    const denominator = Math.max(buffer.length, this.windowSeconds);
+    const meanEnergy = sumEnergy / denominator;
     return Math.max(0, 10 * Math.log10(meanEnergy)); // 0dB 미만은 0으로 표시
   }
 
-  // 최근 60초(측정 구간) 안에 소음을 발생시킨 세대인지
+  // 최근 windowSeconds초(측정 구간) 안에 소음을 발생시킨 세대인지
   isSourceUnit(unit) {
-    return this.elapsed - unit.lastSourceAt <= 60;
+    return this.elapsed - unit.lastSourceAt <= this.windowSeconds;
   }
 
   updateDecibelUI() {
@@ -632,22 +736,22 @@ export class SimulationManager {
         }
 
         return `
-                <div class="unit-row">
-                    <span class="unit-name">${unit.name}</span>
-                    <span class="unit-leq">${leq.toFixed(1)} dB</span>
-                    <span class="status-badge ${statusClass}">${statusText}</span>
-                </div>`;
+          <div class="unit-row">
+            <span class="unit-name">${unit.name}</span>
+            <span class="unit-leq">${leq.toFixed(1)} dB</span>
+            <span class="status-badge ${statusClass}">${statusText}</span>
+          </div>`;
       })
       .join('');
 
     uiElement.innerHTML = `
-            <div style="color: #aaa; margin-bottom: 8px;"><b>현재 설정:</b> ${modeText}</div>
-            <div style="color: #aaa; font-size: 12px; margin-bottom: 6px;">세대별 1분 평균 소음 (Leq)</div>
-            ${rows}
-            <div style="font-size: 11px; color: #888; margin-top: 8px;">
-                (${sampleCount}/60초 측정) · 판정은 소음을 받은 세대 기준
-            </div>
-        `;
+      <div style="color: #aaa; margin-bottom: 8px;"><b>현재 설정:</b> ${modeText}</div>
+      <div style="color: #aaa; font-size: 12px; margin-bottom: 6px;">세대별 평균 소음 (Leq)</div>
+      ${rows}
+      <div style="font-size: 11px; color: #888; margin-top: 8px;">
+        (${sampleCount}/${this.windowSeconds}초 측정) · 반복·연속 소음 시 기준 초과
+      </div>
+    `;
   }
 
   /**

@@ -72,3 +72,13 @@ window.switchMode = (isNight) => {
 
   simulation.setMode(isNight);
 };
+
+// 💡 소음 프리셋 버튼 핸들러
+window.triggerPreset = (type) => {
+  simulation.triggerPreset(type);
+};
+
+// 💡 측정 초기화 버튼 핸들러
+window.resetSimulation = () => {
+  simulation.reset();
+};
