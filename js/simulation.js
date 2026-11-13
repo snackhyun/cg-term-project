@@ -25,16 +25,21 @@ export class SimulationManager {
     this.sampleTimer = 0;
 
     // 💡 발생 지점의 충격 소음 크기
-    //    아랫집에는 slabTL만큼 줄어서 전달되므로, 그만큼 높게 설정
-    //    (짧은 클릭 → 아랫집 약 28dB, 10초 정도 누르면 아랫집 기준 초과)
+    //    아랫집에는 바닥 투과 손실 + 벽을 타고 내려가는 거리 감쇠만큼 줄어서 전달되므로 높게 설정
+    //    (윗집 바닥 중앙을 10초 정도 누르면 아랫집 1분 Leq가 주간 기준 39dB를 넘음)
     this.baseL0 = 43.0;
-    this.waveSpeed = 4.0;
-    this.wallTL = 10.0; // 같은 세대 안에서 벽면에 표시할 때의 감쇠 (dB)
+    this.waveSpeed = 8.0; // 파동이 구조물을 따라 퍼지는 속도 (벽·천장을 타고 가야 하므로 이전보다 빠르게)
+    this.waveLifetime = 3.0; // 파동이 사라지기 시작하는 시간(초)
 
     // 💡 세대 간 투과 손실 (dB)
-    this.slabTL = 15.0; // 위층 → 아래층 (바닥 슬래브를 통한 충격음)
+    this.slabTL = 6.0; // 위층 → 아래층 (바닥 슬래브를 통한 충격음, 벽을 타고 내려가며 거리 감쇠가 추가로 생김)
     this.upwardTL = 25.0; // 아래층 → 위층 (충격음은 위로 잘 안 올라감)
-    this.sideTL = 15.0; // 옆 세대 (세대 간 벽)
+    this.sideTL = 20.0; // 옆 세대 (세대 간 벽)
+
+    // 💡 소음을 낸 세대의 색은 "아랫집에 전달되는 수준"으로 표시
+    //    (발생 세기 그대로 칠하면 짧은 클릭에도 바로 빨간색이 되므로 15dB 낮춰서 표시 → 짧은 클릭은 초록색)
+    //    색에만 적용되며, Leq 측정값에는 영향 없음
+    this.sourceColorOffset = 15.0;
 
     // 💡 길게 누르기 파라미터
     this.isPressing = false; // 현재 마우스를 누르고 있는지
@@ -46,7 +51,8 @@ export class SimulationManager {
     this.pulseOffset = 7.0; // 파동을 촘촘히 만드는 만큼 1개당 세기를 낮춤 (0.5초 간격 대비 5배 → 10·log10(5) ≈ 7dB)
     this.growthRate = 2.0; // 누르고 있는 1초당 증가하는 dB
     this.maxL0 = 60.0; // 파동 1개의 최대 dB
-    this.fadeTime = 1.0; // 끝까지 퍼진 파동이 서서히 사라지는 시간(초)
+    this.fadeTime = 1.5; // 끝까지 퍼진 파동이 서서히 사라지는 시간(초)
+    this.edgeWidth = 2.0; // 퍼져 나가는 원의 테두리를 부드럽게 하는 폭 (색 표시용)
 
     // 💡 색상 깜빡임 방지: 각 정점의 색은 dB를 부드럽게 따라감
     this.colorSmoothing = 4.0; // 클수록 빠르게 반응, 작을수록 부드러움
@@ -73,18 +79,20 @@ export class SimulationManager {
     }
   }
 
-  // 정점의 월드 좌표(x, z)를 미리 계산해 둠 (메시는 움직이지 않으므로 매 프레임 계산할 필요 없음)
+  // 정점의 월드 좌표를 미리 계산해 둠 (메시는 움직이지 않으므로 매 프레임 계산할 필요 없음)
   createSurface(mesh, geometry, isWall) {
     mesh.updateMatrixWorld(true);
     const posAttr = geometry.attributes.position;
     const count = posAttr.count;
     const worldX = new Float32Array(count);
+    const worldY = new Float32Array(count);
     const worldZ = new Float32Array(count);
     const v = new THREE.Vector3();
 
     for (let i = 0; i < count; i++) {
       v.fromBufferAttribute(posAttr, i).applyMatrix4(mesh.matrixWorld);
       worldX[i] = v.x;
+      worldY[i] = v.y;
       worldZ[i] = v.z;
     }
 
@@ -102,12 +110,25 @@ export class SimulationManager {
       bounds.maxZ = Math.max(bounds.maxZ, worldZ[i]);
     }
 
+    // 벽이면 어느 선 위에 놓였는지 (x = 상수인 벽인지, z = 상수인 벽인지)
+    let line = null;
+    if (isWall) {
+      line =
+        bounds.maxX - bounds.minX < 1e-3
+          ? { axis: 'x', value: bounds.minX }
+          : { axis: 'z', value: bounds.minZ };
+    }
+
     return {
       geometry,
       isWall,
       worldX,
+      worldY,
       worldZ,
       bounds,
+      line, // 벽이 놓인 선 (바닥이면 null)
+      levelY: worldY[0], // 바닥 높이 (바닥일 때 사용)
+      pathCache: new Map(), // 충격 지점별 정점 경로 거리 캐시
       smoothed: new Float32Array(count), // 정점별 평활화된 dB
       idle: true, // 색이 모두 기본색인지
     };
@@ -196,12 +217,14 @@ export class SimulationManager {
     this.waves.push({
       x: point.x,
       z: point.z,
+      y: unit.floorY, // 충격이 일어난 바닥 높이
       unit, // 소음이 발생한 세대
-      radius: 0.1,
-      maxRadius: 12.0,
+      radius: 0.1, // 파동 앞부분까지의 경로 거리 (구조물 표면을 따라 잰 거리)
+      maxRadius: 40.0, // 아래·위층 바닥까지 닿을 수 있도록 충분히 크게
       time: 0,
       initialDecibel: decibel,
       fade: 1.0, // 1 → 0 으로 서서히 사라짐
+      fadeElapsed: 0, // 사라지기 시작한 뒤 흐른 시간(초)
     });
   }
 
@@ -225,17 +248,19 @@ export class SimulationManager {
     // 1. 파동 확산 및 감쇠
     for (let i = this.waves.length - 1; i >= 0; i--) {
       const w = this.waves[i];
-      // 반지름은 최대치에서 멈춤 → 끝에 닿아도 바로 삭제하지 않음
       w.radius = Math.min(w.radius + this.waveSpeed * delta, w.maxRadius);
       w.time += delta;
 
       // 💡 감쇠 속도를 천천히 설정 (초당 1.5dB 감소)
       w.initialDecibel -= delta * 1.5;
 
-      // 💡 끝까지 퍼진 파동은 fadeTime 동안 서서히 사라짐
+      // 💡 waveLifetime이 지난 파동은 fadeTime 동안 서서히 사라짐
       //    (한 번에 삭제하면 색 영역이 갑자기 줄었다 늘었다 함)
-      if (w.radius >= w.maxRadius) {
-        w.fade -= delta / this.fadeTime;
+      //    직선으로 줄이면 끝에서 뚝 끊겨 보이므로 코사인 곡선(천천히 → 빠르게 → 천천히)으로 감소
+      if (w.time >= this.waveLifetime) {
+        w.fadeElapsed += delta;
+        const p = Math.min(w.fadeElapsed / this.fadeTime, 1);
+        w.fade = 0.5 * (1 + Math.cos(Math.PI * p));
       }
 
       if (w.fade <= 0 || w.initialDecibel <= 0) {
@@ -284,7 +309,7 @@ export class SimulationManager {
     let peak = 0;
     let stillColored = false;
     for (const surface of unit.surfaces) {
-      const result = this.updateSurface(surface, reaching);
+      const result = this.updateSurface(surface, reaching, unit);
       if (result.peak > peak) peak = result.peak;
       if (result.colored) stillColored = true;
     }
@@ -293,69 +318,216 @@ export class SimulationManager {
     unit.idle = reaching.length === 0 && !stillColored;
   }
 
-  updateSurface(surface, reaching) {
-    const { geometry, isWall, worldX, worldZ, smoothed, bounds } = surface;
+  /**
+   * 💡 구조물을 따라간 경로 거리
+   *    소리는 공기 중을 직선으로 가로지르지 않고 바닥 → 벽 → 천장(윗집 바닥)을 타고 전달된다고 보고,
+   *    지나가는 면들을 평평하게 펼쳤을 때의 직선 거리로 계산한다.
+   *
+   *    (P: 충격 지점, Q: 정점, line: 거쳐 가는 벽이 놓인 선, v: 벽을 타고 오르내린 높이)
+   *    x = 상수인 벽을 거칠 때:  √( (|Px - 벽| + v + |Qx - 벽|)² + (Pz - Qz)² )
+   *    z = 상수인 벽을 거칠 때:  √( (Px - Qx)² + (|Pz - 벽| + v + |Qz - 벽|)² )
+   */
+  unfoldedDistance(px, pz, qx, qz, line, v, endsOnWall) {
+    // endsOnWall: 정점 Q가 그 벽 위에 있으면 벽에서 바닥으로 다시 나가지 않음
+    if (line.axis === 'x') {
+      const across =
+        Math.abs(px - line.value) +
+        v +
+        (endsOnWall ? 0 : Math.abs(qx - line.value));
+      const along = pz - qz;
+      return Math.sqrt(across * across + along * along);
+    } else {
+      const across =
+        Math.abs(pz - line.value) +
+        v +
+        (endsOnWall ? 0 : Math.abs(qz - line.value));
+      const along = px - qx;
+      return Math.sqrt(across * across + along * along);
+    }
+  }
 
-    // 💡 성능: 파동마다 한 번만 계산해 두는 값들
+  /**
+   * 충격 지점 하나에 대한 정점별 경로 거리를 계산해 캐시에 저장
+   * 누르고 있는 동안 생기는 파동은 모두 같은 지점에서 나오므로 한 번만 계산하면 됨 (성능)
+   */
+  getPathCache(surface, w, unit) {
+    const key = `${w.unit.index}:${w.x.toFixed(2)}:${w.z.toFixed(2)}`;
+    const cached = surface.pathCache.get(key);
+    if (cached) return cached;
+
+    const { isWall, worldX, worldY, worldZ, line, levelY } = surface;
+    const count = worldX.length;
+    const dist = new Float32Array(count);
+    const invSqrtR = new Float32Array(count);
+
+    // 경로 종류
+    //  - 같은 높이의 바닥 (발생 세대 바닥, 옆집 바닥) → 수평 직선 거리
+    //  - 벽 정점 → 바닥(또는 천장)을 지나 이 벽을 타고 오르내림
+    //  - 다른 층 바닥 → 벽을 타고 내려가거나 올라온 뒤 바닥을 지나감 (가장 짧은 벽 경로 선택)
+    const otherLevel = !isWall && Math.abs(levelY - w.y) > 1e-3;
+    const viaLines = otherLevel
+      ? this.uniqueLines([...unit.wallLines, ...w.unit.wallLines])
+      : null;
+    const v = otherLevel ? Math.abs(levelY - w.y) : 0;
+
+    for (let i = 0; i < count; i++) {
+      let d;
+      if (isWall) {
+        const h = Math.abs(worldY[i] - w.y); // 벽을 타고 오르내린 높이
+        d = this.unfoldedDistance(
+          w.x,
+          w.z,
+          worldX[i],
+          worldZ[i],
+          line,
+          h,
+          true,
+        );
+      } else if (otherLevel) {
+        d = Infinity;
+        for (const via of viaLines) {
+          d = Math.min(
+            d,
+            this.unfoldedDistance(
+              w.x,
+              w.z,
+              worldX[i],
+              worldZ[i],
+              via,
+              v,
+              false,
+            ),
+          );
+        }
+      } else {
+        const dx = worldX[i] - w.x;
+        const dz = worldZ[i] - w.z;
+        d = Math.sqrt(dx * dx + dz * dz);
+      }
+      dist[i] = d;
+      invSqrtR[i] = 1 / Math.sqrt(Math.max(d, 0.5));
+    }
+
+    const result = { dist, invSqrtR };
+    surface.pathCache.set(key, result);
+    if (surface.pathCache.size > 16) {
+      // 오래된 것부터 삭제 (드래그로 지점이 계속 바뀌는 경우 메모리 제한)
+      surface.pathCache.delete(surface.pathCache.keys().next().value);
+    }
+    return result;
+  }
+
+  // 같은 벽 선이 두 번 들어가지 않도록 정리
+  uniqueLines(lines) {
+    const seen = new Set();
+    return lines.filter((l) => {
+      const k = `${l.axis}:${l.value.toFixed(3)}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  updateSurface(surface, reaching, unit) {
+    const { geometry, isWall, bounds } = surface;
+    const smoothed = surface.smoothed;
+
+    // 💡 성능: 같은 충격 지점에서 나온 파동끼리 묶음
     //    dB(r) = L - 5·log10(r)  →  에너지 10^(dB/10) = 10^(L/10) · r^(-1/2)
-    //    따라서 정점마다 pow/log10을 계산하지 않고 "계수 / √r" 로 에너지를 구함
-    const active = [];
+    //    정점까지의 경로 거리 r은 같은 지점에서 나온 파동끼리 모두 같으므로,
+    //    "파동 앞부분이 이미 지나간 파동들의 계수 합 × 1/√r" 로 한 번에 계산할 수 있음
+    const groups = new Map();
     for (const { w, tl, isSource } of reaching) {
-      const L = w.initialDecibel - tl - (isWall ? this.wallTL : 0);
+      const L = w.initialDecibel - tl;
       if (L + 1.5 <= 0) continue; // r=0.5에서도 0dB 이하면 무시
 
-      // dB > 0 이 되는 최대 거리와 현재 파동 반경 중 작은 값까지만 계산
-      const audibleRange = Math.max(Math.pow(10, L / 5), 0.5);
-      const range = Math.min(w.radius, audibleRange);
-
       // 이 면의 영역과 전혀 겹치지 않으면 제외
+      // (경로 거리는 항상 수평 거리 이상이므로 수평 거리로 먼저 걸러도 안전)
       const nx = Math.max(bounds.minX - w.x, 0, w.x - bounds.maxX);
       const nz = Math.max(bounds.minZ - w.z, 0, w.z - bounds.maxZ);
-      if (nx * nx + nz * nz > range * range) continue;
+      if (nx * nx + nz * nz > w.radius * w.radius) continue;
 
-      active.push({
+      const path = this.getPathCache(surface, w, unit); // 정점별 경로 거리 (캐시)
+      let g = groups.get(path);
+      if (!g) {
+        g = {
+          path,
+          waves: [],
+          colorScale: isSource ? Math.pow(10, -this.sourceColorOffset / 10) : 1, // 색 계산용 에너지 보정
+          ripple: isSource && !isWall, // 바닥 물결은 소음이 발생한 세대에서만 표시
+        };
+        groups.set(path, g);
+      }
+      g.waves.push({
         w,
         L,
         coef: Math.pow(10, L / 10) * w.fade,
-        range2: range * range,
-        ripple: isSource && !isWall, // 바닥 물결은 소음이 발생한 세대에서만 표시
+        radius: w.radius,
       });
     }
 
     // 닿는 파동도 없고 색도 기본색이면 이 면은 건너뜀
-    if (active.length === 0 && surface.idle) {
+    if (groups.size === 0 && surface.idle) {
       return { peak: 0, colored: false };
+    }
+
+    // 묶음마다 파동을 반경이 큰 순서(먼저 생긴 순서)로 정렬하고 계수 누적합을 만들어 둠
+    const groupList = [...groups.values()];
+    for (const g of groupList) {
+      g.waves.sort((a, b) => b.radius - a.radius);
+      const n = g.waves.length;
+      g.radii = new Float32Array(n);
+      g.prefix = new Float64Array(n + 1); // prefix[k] = 앞의 k개 파동 계수 합
+      for (let k = 0; k < n; k++) {
+        g.radii[k] = g.waves[k].radius;
+        g.prefix[k + 1] = g.prefix[k] + g.waves[k].coef;
+      }
     }
 
     const posAttr = geometry.attributes.position;
     const colorAttr = geometry.attributes.color;
     const count = posAttr.count;
     const alpha = this.smoothAlpha ?? 1;
+    const edgeWidth = this.edgeWidth;
 
     let maxdB = 0;
     let colored = false;
     let displaced = false;
 
     for (let i = 0; i < count; i++) {
-      let totalEnergy = 0;
+      let totalEnergy = 0; // 측정용 (실제 세기)
+      let colorEnergy = 0; // 색 표시용 (발생 세대는 sourceColorOffset만큼 낮춤)
       let totalDisplacement = 0;
 
-      for (const a of active) {
-        const dx = worldX[i] - a.w.x;
-        const dz = worldZ[i] - a.w.z;
-        const dist2 = dx * dx + dz * dz;
-        if (dist2 > a.range2) continue;
+      for (const g of groupList) {
+        // 구조물을 따라간 경로 거리 (미리 계산해 둔 값 사용)
+        const dist = g.path.dist[i];
+        const inv = g.path.invSqrtR[i]; // 1/√r (r은 최소 0.5)
 
-        // 거리에 따른 로그 감쇠 + 세대 간 투과 손실 (r은 최소 0.5)
-        const dist = Math.sqrt(dist2);
-        const r = Math.max(dist, 0.5);
-        totalEnergy += a.coef / Math.sqrt(r);
+        // 파동 앞부분이 이 정점을 지나간 파동 수 (반경 ≥ dist)
+        const k = this.countAtLeast(g.radii, dist);
+        if (k === 0) continue;
 
-        if (a.ripple) {
-          const dB = a.L - 5.0 * Math.log10(r);
-          const waveShape =
-            Math.cos(dist * 2.0 - a.w.time * 5.0) * Math.exp(-a.w.time * 0.8);
-          totalDisplacement += waveShape * (dB / 30.0) * a.w.fade;
+        // 거리에 따른 로그 감쇠 + 세대 간 투과 손실: 에너지 = 계수 합 / √r
+        totalEnergy += g.prefix[k] * inv;
+
+        // 퍼져 나가는 원의 테두리 부근(edgeWidth 이내)은 색을 점점 옅게 (경계가 칼같이 끊기지 않도록)
+        const m = this.countAtLeast(g.radii, dist + edgeWidth);
+        let colorCoef = g.prefix[m];
+        for (let j = m; j < k; j++) {
+          colorCoef += (g.waves[j].coef * (g.radii[j] - dist)) / edgeWidth;
+        }
+        colorEnergy += colorCoef * inv * g.colorScale;
+
+        if (g.ripple) {
+          for (let j = 0; j < k; j++) {
+            const { w, L } = g.waves[j];
+            const dB = L - 5.0 * Math.log10(Math.max(dist, 0.5));
+            if (dB <= 0) continue;
+            const waveShape =
+              Math.cos(dist * 2.0 - w.time * 5.0) * Math.exp(-w.time * 0.8);
+            totalDisplacement += waveShape * (dB / 30.0) * w.fade;
+          }
         }
       }
 
@@ -371,9 +543,10 @@ export class SimulationManager {
         }
       }
 
-      // 색은 평활화된 dB로 결정 (측정값 maxdB는 원래 값 사용)
-      smoothed[i] += (combineddB - smoothed[i]) * alpha;
-      if (smoothed[i] < 0.5 && combineddB <= 0) smoothed[i] = 0;
+      // 색은 평활화된 표시용 dB로 결정 (측정값 maxdB는 실제 세기 사용)
+      const colordB = colorEnergy > 1 ? 10 * Math.log10(colorEnergy) : 0;
+      smoothed[i] += (colordB - smoothed[i]) * alpha;
+      if (smoothed[i] < 0.5 && colordB <= 0) smoothed[i] = 0;
       if (smoothed[i] > 0) colored = true;
 
       const color = this.decibelToColor(smoothed[i]);
@@ -386,8 +559,20 @@ export class SimulationManager {
       geometry.computeVertexNormals();
     }
 
-    surface.idle = active.length === 0 && !colored;
+    surface.idle = groups.size === 0 && !colored;
     return { peak: maxdB, colored };
+  }
+
+  // 내림차순으로 정렬된 배열에서 value 이상인 원소 개수 (이진 탐색)
+  countAtLeast(sortedDesc, value) {
+    let lo = 0;
+    let hi = sortedDesc.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedDesc[mid] >= value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
   }
 
   calculateLeq1Min(unit) {
@@ -469,14 +654,30 @@ export class SimulationManager {
    * 데시벨 단계별 히트맵 색상 매핑
    */
   decibelToColor(dB) {
-    if (dB <= 0) return { r: 0.0, g: 0.5, b: 0.5 }; // 소음 0dB (기본 옥색)
+    const base = { r: 0.0, g: 0.6, b: 0.5 }; // 기본 옥색 (floor.js의 초기색과 동일)
+    const green = { r: 0.0, g: 1.0, b: 0.0 };
+    const yellow = { r: 1.0, g: 1.0, b: 0.0 };
+    const red = { r: 1.0, g: 0.0, b: 0.0 };
+    const blend = 2.0; // 단계 경계 바로 아래 2dB 구간에서 색을 섞어 계단처럼 바뀌지 않게 함
 
-    if (dB < 30) {
-      return { r: 0.0, g: 1.0, b: 0.0 }; // 초록색: 30dB 미만
-    } else if (dB < this.legalThreshold) {
-      return { r: 1.0, g: 1.0, b: 0.0 }; // 노란색: 30dB 이상 ~ 법적 기준 미만
-    } else {
-      return { r: 1.0, g: 0.0, b: 0.0 }; // 빨간색: 법적 기준 이상 (주간 39dB / 야간 34dB)
-    }
+    if (dB <= 0) return base; // 소음 0dB
+    if (dB < 20) return this.mixColor(base, green, dB / 20); // 0~20dB: 옥색 → 초록 (서서히 나타나고 사라짐)
+    if (dB < 30 - blend) return green; // 초록색: 30dB 미만
+    if (dB < 30)
+      return this.mixColor(green, yellow, (dB - (30 - blend)) / blend);
+    const t = this.legalThreshold;
+    if (dB < t - blend) return yellow; // 노란색: 30dB 이상 ~ 법적 기준 미만
+    if (dB < t) return this.mixColor(yellow, red, (dB - (t - blend)) / blend);
+    return red; // 빨간색: 법적 기준 이상 (주간 39dB / 야간 34dB)
+  }
+
+  // 두 색을 t(0~1) 비율로 부드럽게 섞음 (smoothstep)
+  mixColor(a, b, t) {
+    const k = t * t * (3 - 2 * t);
+    return {
+      r: a.r + (b.r - a.r) * k,
+      g: a.g + (b.g - a.g) * k,
+      b: a.b + (b.b - a.b) * k,
+    };
   }
 }

@@ -34,6 +34,15 @@ export function createBuilding() {
     unit.floorLevel = info.floorLevel;
     unit.column = info.column;
     unit.index = units.length;
+    unit.floorY = offsetY; // 바닥 높이
+
+    // 💡 벽이 놓인 선 (파동이 벽을 타고 위·아래층으로 갈 때의 경로 계산에 사용)
+    const half = UNIT_SIZE / 2;
+    unit.wallLines = [
+      { axis: 'z', value: -half }, // 뒤쪽 벽 (z = -8)
+      { axis: 'x', value: offsetX - half }, // 좌측 벽
+      { axis: 'x', value: offsetX + half }, // 우측 벽
+    ];
     unit.floor.userData.unitIndex = unit.index; // 클릭한 바닥이 어느 세대인지 찾기 위함
 
     buildingGroup.add(unit.group);
