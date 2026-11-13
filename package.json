@@ -1,0 +1,22 @@
+{
+  "name": "cg-term-project",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "format": "prettier --write src tests index.html vite.config.js"
+  },
+  "dependencies": {
+    "lil-gui": "^0.21.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.10.1",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
