@@ -17,11 +17,6 @@ function fmt(dB) {
   return Number.isFinite(dB) && dB > 0 ? dB.toFixed(1) : '–';
 }
 
-/** 대역 이름 */
-function bandName(f) {
-  return f >= 1000 ? `${f / 1000}k` : String(f);
-}
-
 /** 레벨 막대 위치 (%) */
 function percent(dB) {
   if (!Number.isFinite(dB) || dB <= 0) return 0;
@@ -56,25 +51,6 @@ function unitRow(u, m) {
     </div>`;
 }
 
-/** 가장 시끄러운 수음 세대의 대역별 Leq */
-function bandTable(m) {
-  const heard = m.units.filter(
-    (u) => !u.isSource && Number.isFinite(u.leq) && u.leq > 0,
-  );
-  if (heard.length === 0) return '';
-  const worst = heard.reduce((a, b) => (b.leq > a.leq ? b : a));
-  const cells = m.bands
-    .map((f, b) => {
-      const star = m.extrapolatedBands.includes(f) ? '*' : '';
-      return `<div class="band num"><span>${bandName(f)}${star}</span>${fmt(worst.bandLeq[b])}</div>`;
-    })
-    .join('');
-  return `
-    <div class="band-title">${worst.name} 대역별 Leq · dB, A보정 전</div>
-    <div class="bands">${cells}</div>
-    <div class="meas-meta">* 63 Hz는 표준 계산 범위(125–2000 Hz) 밖 외삽</div>`;
-}
-
 /**
  * 측정 패널 본문
  * @param {object} m getMeasurement() 결과
@@ -99,6 +75,5 @@ export function renderMeasurementHtml(m) {
     <div class="unit-row unit-head">
       <span>세대</span><span>Leq</span><span>Lmax</span><span></span>
     </div>
-    <div class="unit-rows">${ordered.map((u) => unitRow(u, m)).join('')}</div>
-    ${bandTable(m)}`;
+    <div class="unit-rows">${ordered.map((u) => unitRow(u, m)).join('')}</div>`;
 }
