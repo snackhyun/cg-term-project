@@ -2,7 +2,7 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <link rel="icon" href="data:," />
     <title>층간소음 시뮬레이터</title>
     <style>
@@ -46,6 +46,25 @@
         border: 1px solid var(--hair);
         border-radius: 14px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+      #info summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 28px;
+        cursor: pointer;
+        list-style: none;
+      }
+      #info summary::-webkit-details-marker {
+        display: none;
+      }
+      #info summary::after {
+        content: "+";
+        color: var(--text-2);
+        font-size: 20px;
+      }
+      #info[open] summary::after {
+        content: "−";
       }
       #info h1 {
         margin: 0;
@@ -192,14 +211,10 @@
         color: var(--text-2);
         font-size: 12px;
       }
-      .meas-meta,
-      .meas-notes {
+      .meas-meta {
         color: var(--muted);
         font-size: 11px;
         line-height: 16px;
-      }
-      .meas-notes {
-        margin-top: 12px;
       }
       .unit-rows {
         max-height: 32vh;
@@ -340,11 +355,70 @@
         border-radius: 14px;
         overflow: hidden;
       }
+      @media (max-width: 700px) {
+        #info {
+          top: auto;
+          bottom: max(8px, env(safe-area-inset-bottom));
+          left: max(8px, env(safe-area-inset-left));
+          right: max(8px, env(safe-area-inset-right));
+          width: auto;
+          max-height: 52vh;
+          max-height: 52dvh;
+          padding: 10px 12px;
+          overscroll-behavior: contain;
+        }
+        #info summary {
+          min-height: 44px;
+        }
+        #info .btn,
+        #info .mode-btn,
+        #info .unit-select {
+          min-height: 44px;
+        }
+        #info .unit-select {
+          font-size: 16px;
+        }
+        .section-label:has(.unit-select) {
+          height: auto;
+          min-height: 44px;
+          margin-bottom: 8px;
+        }
+        .follow-toggle {
+          min-height: 44px;
+        }
+        .follow-toggle input {
+          width: 20px;
+          height: 20px;
+        }
+        .unit-rows {
+          max-height: none;
+        }
+        .unit-row {
+          grid-template-columns: 44px 58px 64px minmax(0, 1fr);
+        }
+        .status::before {
+          flex-shrink: 0;
+        }
+        .lil-gui.root {
+          top: max(8px, env(safe-area-inset-top));
+          right: max(8px, env(safe-area-inset-right));
+          width: min(300px, calc(100vw - 16px));
+          max-height: 40vh;
+          max-height: 40dvh;
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          --widget-height: 36px;
+          --input-font-size: 16px;
+        }
+        .lil-gui.root > .title {
+          min-height: 44px;
+        }
+      }
     </style>
   </head>
   <body>
-    <div id="info">
-      <h1>층간소음 시뮬레이터</h1>
+    <details id="info" open>
+      <summary><h1>층간소음 시뮬레이터</h1></summary>
       <p class="hint">바닥이나 벽을 누르거나 길게 눌러 충격 발생</p>
 
       <div class="section">
@@ -401,7 +475,7 @@
           측정 초기화
         </button>
       </div>
-    </div>
+    </details>
 
     <script type="module" src="/src/main.js"></script>
   </body>

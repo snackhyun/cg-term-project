@@ -100,11 +100,5 @@ export function renderMeasurementHtml(m) {
       <span>세대</span><span>Leq</span><span>Lmax</span><span></span>
     </div>
     <div class="unit-rows">${ordered.map((u) => unitRow(u, m)).join('')}</div>
-    ${bandTable(m)}
-    <div class="meas-notes">
-      막대: Leq, 세로선은 Leq 기준 ${m.limits.leq} dB(A)<br>
-      Leq 판정은 구간 최고값 · Lmax는 최근 1시간 ${m.lmaxRule.count}회 이상 넘으면 초과<br>
-      히트맵 색: 충격 1회 L_AFmax · 초록 &lt; ${m.limits.leq} ≤ 노랑 &lt; ${m.limits.lmax} ≤ 빨강<br>
-      화면 파동: 굽힘파(125 Hz 군속도 ${m.physicalSpeed.toFixed(0)} m/s)의 1/${m.slowMotion} = ${m.visualSpeed.toFixed(1)} m/s
-    </div>`;
+    ${bandTable(m)}`;
 }
